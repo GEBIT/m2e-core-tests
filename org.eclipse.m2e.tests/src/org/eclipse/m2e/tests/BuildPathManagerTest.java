@@ -18,6 +18,8 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Properties;
+import java.util.zip.ZipException;
+import java.util.zip.ZipFile;
 
 import org.eclipse.core.resources.ICommand;
 import org.eclipse.core.resources.IProject;
@@ -67,6 +69,7 @@ import org.eclipse.m2e.jdt.MavenJdtPlugin;
 import org.eclipse.m2e.jdt.internal.BuildPathManager;
 import org.eclipse.m2e.tests.common.AbstractMavenProjectTestCase;
 import org.eclipse.m2e.tests.common.ClasspathHelpers;
+import org.eclipse.m2e.tests.common.FileHelpers;
 import org.eclipse.m2e.tests.common.WorkspaceHelpers;
 
 
@@ -667,6 +670,87 @@ public class BuildPathManagerTest extends AbstractMavenProjectTestCase {
       assertNull(cp[0].getSourceAttachmentPath());
     } finally {
       ((MavenConfigurationImpl) mavenConfiguration).setDownloadSources(oldDownloadSources);
+    }
+  }
+
+  /**
+   * Tests that sources are updated from a custom remote repo when a snapshot version has been updated.
+   */
+  public void testDownloadSources_008_afterSnapshotUpdate() throws Exception {
+    File installedDependencyFolder = new File(repo, "downloadsources/downloadsources-t008/0.0.1-SNAPSHOT/");
+//    File sourceInstalled = new File(repo, "downloadsources/downloadsources-t008/0.0.1-SNAPSHOT/");
+    deleteSourcesAndJavadoc(installedDependencyFolder);
+
+    IProject project = createExisting("downloadsources-p008", "projects/downloadsources/p008");
+    waitForJobsToComplete();
+
+    IJavaProject javaProject = JavaCore.create(project);
+    IClasspathContainer container = BuildPathManager.getMaven2ClasspathContainer(javaProject);
+
+    // sanity check
+    IClasspathEntry[] cp = container.getClasspathEntries();
+    assertEquals(1, cp.length);
+    assertNull(cp[0].getSourceAttachmentPath());
+
+    // download sources from remote repo
+    getBuildPathManager().scheduleDownload(project, true, false);
+    waitForJobsToComplete();
+    container = BuildPathManager.getMaven2ClasspathContainer(javaProject);
+    cp = container.getClasspathEntries();
+    assertEquals(1, cp.length);
+    assertEquals("downloadsources-t008-0.0.1-SNAPSHOT-sources.jar", cp[0].getSourceAttachmentPath().lastSegment());
+
+    assertSourceAttachmentJar(cp[0], true, false);
+
+    // now update the remote repo (delete and rename a directory containing a newer version of the snapshot)
+    File remoteRepoDir = new File("repositories/testrepo/downloadsources/");
+    String projectDirName = "downloadsources-t008";
+    File projectDir = new File(remoteRepoDir, projectDirName);
+    FileHelpers.deleteDirectory(projectDir.getAbsoluteFile());
+    assertTrue(new File(remoteRepoDir, projectDirName + "-updated").renameTo(projectDir));
+
+    // now get the classpath again, first with download-sources disabled:
+    // we should still get the same snapshot version
+    boolean oldDownloadSources = mavenConfiguration.isDownloadSources();
+    try {
+      ((MavenConfigurationImpl) mavenConfiguration).setDownloadSources(false);
+      MavenPlugin.getMavenProjectRegistry().refresh(new MavenUpdateRequest(project, false /*offline*/, true));
+      waitForJobsToComplete();
+      assertSourceAttachmentJar(cp[0], true, false);
+    } finally {
+      ((MavenConfigurationImpl) mavenConfiguration).setDownloadSources(oldDownloadSources);
+    }
+
+    // now get the classpath again with download-sources enabled:
+    // the updated snapshot should be downloaded and attached to the project
+    try {
+      ((MavenConfigurationImpl) mavenConfiguration).setDownloadSources(true);
+      MavenPlugin.getMavenProjectRegistry().refresh(new MavenUpdateRequest(project, false /*offline*/, true));
+      waitForJobsToComplete();
+      assertSourceAttachmentJar(cp[0], true, true);
+    } finally {
+      ((MavenConfigurationImpl) mavenConfiguration).setDownloadSources(oldDownloadSources);
+    }
+  }
+
+  /**
+   * @param entry
+   * @param hasFile1 whether the file "1" is expected to be present in the entry's source attachment jar
+   * @param hasFile2 whether the file "2" is expected to be present in the entry's source attachment jar
+   * @throws IOException
+   * @throws ZipException
+   */
+  private void assertSourceAttachmentJar(IClasspathEntry entry, boolean hasFile1, boolean hasFile2)
+      throws ZipException, IOException {
+    IClasspathEntry resolvedEntry = JavaCore.getResolvedClasspathEntry(entry);
+    assertNotNull(resolvedEntry);
+
+    IPath sourceAttachment = resolvedEntry.getSourceAttachmentPath();
+    assertNotNull(sourceAttachment);
+
+    try (ZipFile sourceZip = new ZipFile(sourceAttachment.toFile())) {
+      assertEquals(hasFile1, sourceZip.getEntry("1") != null); // present in the first snapshot
+      assertEquals(hasFile2, sourceZip.getEntry("2") != null); // not present in the first snapshot 
     }
   }
 
